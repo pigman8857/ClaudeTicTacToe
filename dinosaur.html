@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dino Run</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #222;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: 'Courier New', monospace;
+      color: #fff;
+      overflow: hidden;
+    }
+    #hud {
+      display: flex;
+      gap: 2rem;
+      margin-bottom: 0.5rem;
+      font-size: 1rem;
+      letter-spacing: 2px;
+    }
+    #hud span { color: #0ff; }
+    #speedVal { color: #0ff; }
+    canvas {
+      border: 1px solid #333;
+      background: #1a2a1a;
+      display: block;
+    }
+    #message {
+      margin-top: 0.8rem;
+      font-size: 0.85rem;
+      color: #555;
+      letter-spacing: 1px;
+    }
+    #overlay {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      pointer-events: none;
+    }
+    #overlay h2 { font-size: 2.5rem; letter-spacing: 4px; }
+    #overlay p  { font-size: 1rem; color: #aaa; }
+  </style>
+</head>
+<body>
+
+<div id="hud">
+  TIME: <span id="timerVal">10.0</span>s &nbsp;|&nbsp;
+  SPEED: <span id="speedVal">0</span> &nbsp;|&nbsp;
+  DIST: <span id="distVal">0</span>%
+</div>
+<canvas id="c" width="700" height="300"></canvas>
+<div id="message">MASH SPACE to run &nbsp;|&nbsp; R RESTART</div>
+
+<div id="overlay">
+  <h2 id="overlayTitle"></h2>
+  <p id="overlaySub"></p>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// Constants
+const WORLD_WIDTH    = 4000;
+const DINO_X         = 120;
+const GROUND_Y       = H - 30;
+const FOOD_WORLD_X   = 3920;
+const TIME_LIMIT     = 10000;
+const MAX_SPEED      = 800;
+const MIN_SPEED      = 60;
+const SPEED_WINDOW   = 1000;
+const PRESSES_FOR_MAX = 8;
+
+// State
+let state, cameraX, spacePresses, currentSpeed, animTick, timeRemaining, bgElements;
+
+function init() {
+  state         = 'play';
+  cameraX       = 0;
+  spacePresses  = [];
+  currentSpeed  = MIN_SPEED;
+  animTick      = 0;
+  timeRemaining = TIME_LIMIT;
+
+  document.getElementById('overlayTitle').textContent = '';
+  document.getElementById('overlaySub').textContent   = '';
+
+  // Seed background elements
+  bgElements = [];
+  // Far layer (parallax 0.3×) — rocks and small bushes
+  for (let i = 0; i < 40; i++) {
+    const wx = 200 + ((i * 347 + 113) % (WORLD_WIDTH - 200));
+    const type = i % 3 === 0 ? 'rock' : 'bush';
+    bgElements.push({ wx, type, layer: 'far', h: 8 + (i % 3) * 4 });
+  }
+  // Near layer (parallax 1×) — taller rocks and trees
+  for (let i = 0; i < 30; i++) {
+    const wx = 300 + ((i * 613 + 77) % (WORLD_WIDTH - 400));
+    const type = i % 2 === 0 ? 'tree' : 'rock';
+    bgElements.push({ wx, type, layer: 'near', h: 20 + (i % 4) * 10 });
+  }
+
+  updateHUD();
+}
+
+function updateHUD() {
+  const timerEl = document.getElementById('timerVal');
+  const speedEl = document.getElementById('speedVal');
+  const distEl  = document.getElementById('distVal');
+
+  timerEl.textContent = Math.max(0, timeRemaining / 1000).toFixed(1);
+
+  const speedPct = (currentSpeed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
+  const speedDisplay = Math.round(currentSpeed);
+  speedEl.textContent = speedDisplay;
+  if (speedPct < 0.33) {
+    speedEl.style.color = '#0ff';
+  } else if (speedPct < 0.66) {
+    speedEl.style.color = '#ff0';
+  } else {
+    speedEl.style.color = '#f44';
+  }
+
+  const distPct = Math.min(100, Math.round((cameraX / (FOOD_WORLD_X - DINO_X)) * 100));
+  distEl.textContent = distPct;
+}
+
+// ── Drawing helpers ───────────────────────────────────────────────
+
+function drawBackground() {
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  grad.addColorStop(0, '#1a2a1a');
+  grad.addColorStop(1, '#2a3a2a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, GROUND_Y);
+
+  // Far layer elements
+  bgElements.filter(e => e.layer === 'far').forEach(e => {
+    const sx = e.wx - cameraX * 0.3;
+    // wrap for parallax
+    const x = ((sx % W) + W) % W;
+    ctx.fillStyle = '#3a4a3a';
+    if (e.type === 'rock') {
+      ctx.beginPath();
+      ctx.ellipse(x, GROUND_Y - e.h / 2, e.h * 0.8, e.h / 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // bush
+      ctx.beginPath();
+      ctx.arc(x, GROUND_Y - e.h / 2, e.h / 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x - e.h * 0.4, GROUND_Y - e.h * 0.35, e.h * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x + e.h * 0.4, GROUND_Y - e.h * 0.35, e.h * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  // Near layer elements
+  bgElements.filter(e => e.layer === 'near').forEach(e => {
+    const sx = e.wx - cameraX;
+    if (sx < -60 || sx > W + 60) return;
+    if (e.type === 'tree') {
+      // trunk
+      ctx.fillStyle = '#5a3a1a';
+      ctx.fillRect(sx - 4, GROUND_Y - e.h, 8, e.h);
+      // foliage
+      ctx.fillStyle = '#2a5a2a';
+      ctx.beginPath();
+      ctx.arc(sx, GROUND_Y - e.h - 10, e.h * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = '#5a5a5a';
+      ctx.beginPath();
+      ctx.ellipse(sx, GROUND_Y - e.h / 2, e.h * 0.9, e.h / 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  // Ground
+  ctx.fillStyle = '#5a4a2a';
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.fillStyle = '#6a5a3a';
+  ctx.fillRect(0, GROUND_Y, W, 3);
+}
+
+function drawDino() {
+  ctx.save();
+  ctx.translate(DINO_X, GROUND_Y);
+
+  const legAngle = Math.sin(animTick) * 0.45;
+
+  // Tail
+  ctx.fillStyle = '#4a8a3a';
+  ctx.save();
+  ctx.translate(-22, -18);
+  ctx.rotate(0.3);
+  ctx.fillRect(-14, -5, 18, 8);
+  ctx.restore();
+
+  // Body
+  ctx.fillStyle = '#5a9a4a';
+  ctx.fillRect(-18, -38, 36, 26);
+
+  // Neck
+  ctx.fillStyle = '#5a9a4a';
+  ctx.fillRect(8, -52, 12, 18);
+
+  // Head
+  ctx.fillStyle = '#5a9a4a';
+  ctx.fillRect(6, -62, 22, 14);
+
+  // Snout
+  ctx.fillStyle = '#4a8a3a';
+  ctx.fillRect(22, -56, 10, 9);
+
+  // Eye
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(16, -60, 6, 6);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(18, -58, 3, 3);
+
+  // Tiny arm
+  ctx.fillStyle = '#4a8a3a';
+  ctx.fillRect(10, -30, 8, 5);
+  ctx.fillRect(16, -26, 5, 5);
+
+  // Left leg (front)
+  ctx.save();
+  ctx.translate(-6, -12);
+  ctx.rotate(legAngle);
+  ctx.fillStyle = '#4a8a3a';
+  ctx.fillRect(-4, 0, 8, 14);
+  ctx.save();
+  ctx.translate(0, 14);
+  ctx.rotate(-legAngle * 0.6);
+  ctx.fillRect(-4, 0, 8, 10);
+  ctx.restore();
+  ctx.restore();
+
+  // Right leg (back)
+  ctx.save();
+  ctx.translate(6, -12);
+  ctx.rotate(-legAngle);
+  ctx.fillStyle = '#4a8a3a';
+  ctx.fillRect(-4, 0, 8, 14);
+  ctx.save();
+  ctx.translate(0, 14);
+  ctx.rotate(legAngle * 0.6);
+  ctx.fillRect(-4, 0, 8, 10);
+  ctx.restore();
+  ctx.restore();
+
+  ctx.restore();
+}
+
+function drawFood() {
+  const sx = FOOD_WORLD_X - cameraX;
+  if (sx < -60 || sx > W + 60) return;
+  const y = GROUND_Y - 22;
+
+  ctx.save();
+  ctx.translate(sx, y);
+
+  // Apple body
+  ctx.fillStyle = '#dd2222';
+  ctx.beginPath();
+  ctx.arc(0, 0, 18, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Shine
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.beginPath();
+  ctx.ellipse(-5, -7, 6, 4, -0.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Stem
+  ctx.strokeStyle = '#5a3a1a';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(2, -18);
+  ctx.quadraticCurveTo(8, -28, 4, -32);
+  ctx.stroke();
+
+  // Leaf
+  ctx.fillStyle = '#3a8a2a';
+  ctx.beginPath();
+  ctx.moveTo(4, -28);
+  ctx.quadraticCurveTo(16, -34, 14, -24);
+  ctx.quadraticCurveTo(8, -22, 4, -28);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawDistanceMarker() {
+  // Show a flag at start and goal marker
+  const goalSx = FOOD_WORLD_X - cameraX + 20;
+  if (goalSx > 0 && goalSx < W) {
+    ctx.fillStyle = '#ff0';
+    ctx.fillRect(goalSx, GROUND_Y - 60, 3, 60);
+    ctx.fillStyle = '#f80';
+    ctx.beginPath();
+    ctx.moveTo(goalSx + 3, GROUND_Y - 60);
+    ctx.lineTo(goalSx + 18, GROUND_Y - 52);
+    ctx.lineTo(goalSx + 3, GROUND_Y - 44);
+    ctx.fill();
+  }
+}
+
+// ── Game loop ─────────────────────────────────────────────────────
+let last = 0;
+function loop(ts) {
+  const dt = Math.min(ts - last, 50);
+  last = ts;
+
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+
+  if (state === 'play') update(dt);
+  render();
+
+  requestAnimationFrame(loop);
+}
+
+function update(dt) {
+  const now = performance.now();
+
+  // Prune old presses
+  spacePresses = spacePresses.filter(t => now - t <= SPEED_WINDOW);
+
+  // Derive speed from press rate
+  const t = Math.min(spacePresses.length / PRESSES_FOR_MAX, 1.0);
+  currentSpeed = MIN_SPEED + t * (MAX_SPEED - MIN_SPEED);
+
+  // Advance camera
+  cameraX += currentSpeed * (dt / 1000);
+
+  // Animate legs
+  animTick += (currentSpeed / MAX_SPEED) * 8 * (dt / 1000);
+
+  // Win check first
+  if (cameraX + DINO_X >= FOOD_WORLD_X - 20) {
+    endGame('win');
+    return;
+  }
+
+  // Lose check
+  timeRemaining -= dt;
+  if (timeRemaining <= 0) {
+    timeRemaining = 0;
+    endGame('lose');
+    return;
+  }
+
+  updateHUD();
+}
+
+function render() {
+  drawDistanceMarker();
+  drawFood();
+  drawDino();
+
+  if (state === 'win' || state === 'lose') {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+function endGame(result) {
+  state = result;
+  updateHUD();
+  const title = document.getElementById('overlayTitle');
+  const sub   = document.getElementById('overlaySub');
+  if (result === 'win') {
+    title.style.color = '#0f0';
+    title.textContent = 'YOU WIN!';
+    sub.textContent   = 'The dino got the apple! — Press R to play again';
+  } else {
+    title.style.color = '#f44';
+    title.textContent = 'TIME\'S UP!';
+    const pct = Math.round((cameraX / (FOOD_WORLD_X - DINO_X)) * 100);
+    sub.textContent = `You made it ${pct}% — Press R to play again`;
+  }
+}
+
+// ── Input ─────────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (state === 'play') spacePresses.push(performance.now());
+  }
+  if (e.key === 'r' || e.key === 'R') init();
+});
+
+// ── Start ─────────────────────────────────────────────────────────
+init();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
